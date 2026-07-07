@@ -1,0 +1,146 @@
+name: ci
+# Build images + tests + secret scan + governance self-validation (A2).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  governance:
+    name: governance self-validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run governance harness
+        run: python3 scripts/validate_governance.py
+
+  secret-scan:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-images:
+    name: build docker images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend + frontend images
+        run: |
+          if [ -f backend/package.json ] && [ -f frontend/package.json ]; then
+            docker build -f backend/Dockerfile  -t tickets-backend  .
+            docker build -f frontend/Dockerfile -t tickets-frontend .
+          else
+            echo "Workspace manifests not present yet (Phase 0); skipping image build."
+          fi
+
+  backend-unit:
+    name: backend unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install workspace deps
+        run: npm ci
+      - name: Build @app/shared (backend imports it)
+        run: npm run build --workspace @app/shared --if-present
+      - name: Generate Prisma client
+        run: npm exec -w backend -- prisma generate
+      - name: Backend unit tests
+        # Integration suites self-skip without DATABASE_URL (see backend-integration).
+        run: npm test -w backend
+
+  backend-integration:
+    name: backend integration tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: user
+          POSTGRES_PASSWORD: pass
+          POSTGRES_DB: tickets
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U user -d tickets"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgresql://user:pass@localhost:5432/tickets
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install workspace deps
+        run: npm ci
+      - name: Build @app/shared (backend imports it)
+        run: npm run build --workspace @app/shared --if-present
+      - name: Generate Prisma client
+        run: npm exec -w backend -- prisma generate
+      - name: Apply migrations (prisma migrate deploy)
+        run: npm run migrate -w backend
+      - name: Backend integration tests
+        run: npm test -w backend
+
+  frontend-unit:
+    name: frontend unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install workspace deps
+        run: npm ci
+      - name: Build @app/shared (frontend imports it)
+        run: npm run build --workspace @app/shared --if-present
+      - name: Frontend unit tests
+        run: npm test -w frontend
+
+  e2e:
+    name: playwright e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Seed .env (defaults; entrypoint mints an ephemeral JWT_SECRET)
+        run: cp .env.example .env
+      - name: Bring up the full stack (dev profile => Mailhog for verification)
+        run: docker compose --profile dev up --build -d
+      - name: Wait for backend /ready
+        run: |
+          for i in $(seq 1 60); do
+            if docker compose exec -T backend node -e "fetch('http://127.0.0.1:'+(process.env.BACKEND_PORT||3000)+'/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; then
+              echo "backend /ready OK"; exit 0
+            fi
+            sleep 5
+          done
+          echo "backend did not become ready"; docker compose logs --no-color; exit 1
+      - name: Install deps + Playwright browser
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Run E2E (Playwright)
+        env:
+          E2E_BASE_URL: http://localhost:8080
+          MAILHOG_URL: http://localhost:8025
+        run: npx playwright test --config e2e/playwright.config.ts --project=chromium
+      - name: Tear down
+        if: always()
+        run: docker compose --profile dev down -v

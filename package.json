@@ -1,0 +1,27 @@
+{
+  "name": "tickets-app",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Hackathon Ticket Tracker — monorepo root (npm workspaces).",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20 <21",
+    "npm": ">=10"
+  },
+  "workspaces": [
+    "backend",
+    "frontend",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "migrate": "npm run migrate --workspace backend --if-present",
+    "mock": "npm run mock --workspace @app/shared --if-present"
+  },
+  "overrides": {
+    "lodash": "4.18.1",
+    "typescript": "5.6.3"
+  }
+}

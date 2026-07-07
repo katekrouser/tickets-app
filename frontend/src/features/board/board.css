@@ -1,0 +1,186 @@
+/* Board feature styles (A12). Uses the foundation CSS variables from @/app/styles.css. */
+
+.board {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+/* ---- Toolbar ------------------------------------------------------------- */
+.board-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.75rem;
+}
+
+.board-toolbar-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 160px;
+}
+
+.board-toolbar-field--grow {
+  flex: 1 1 220px;
+}
+
+.board-toolbar-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-muted);
+}
+
+.board-toolbar-actions {
+  margin-left: auto;
+  align-self: flex-end;
+}
+
+.board-select {
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font: inherit;
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+/* ---- Columns ------------------------------------------------------------- */
+.board-columns {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(220px, 1fr);
+  gap: 0.75rem;
+  overflow-x: auto;
+  padding-bottom: 0.5rem;
+  align-items: start;
+}
+
+.board-column {
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  min-height: 120px;
+}
+
+.board-column--over {
+  border-color: var(--color-primary);
+  box-shadow: inset 0 0 0 1px var(--color-primary);
+}
+
+.board-column-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6rem 0.7rem;
+  border-bottom: 1px solid var(--color-border);
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
+.board-column-title {
+  color: var(--color-text);
+}
+
+.board-column-count {
+  min-width: 1.4rem;
+  text-align: center;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  color: var(--color-muted);
+  font-size: 0.75rem;
+}
+
+.board-column-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.6rem;
+  flex: 1;
+}
+
+.board-column-empty {
+  margin: 0;
+  padding: 0.75rem 0;
+  text-align: center;
+  color: var(--color-muted);
+  font-size: 0.85rem;
+}
+
+/* ---- Card ---------------------------------------------------------------- */
+.board-card-wrap {
+  cursor: grab;
+  outline: none;
+}
+
+.board-card-wrap:focus-visible {
+  box-shadow: 0 0 0 2px var(--color-primary);
+  border-radius: var(--radius);
+}
+
+.board-card-wrap--dragging {
+  opacity: 0.4;
+}
+
+.board-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 0.6rem 0.7rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.board-card--overlay {
+  cursor: grabbing;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.22);
+}
+
+.board-card-title {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--color-text);
+}
+
+.board-card-type {
+  align-self: flex-start;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  color: #fff;
+}
+
+.board-card-type--bug {
+  background: var(--color-error);
+}
+
+.board-card-type--feature {
+  background: var(--color-primary);
+}
+
+.board-card-type--fix {
+  background: var(--color-success);
+}
+
+/* ---- Toast host ---------------------------------------------------------- */
+.board-toast-host {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 200;
+  max-width: 360px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+  border-radius: var(--radius);
+}

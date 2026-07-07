@@ -1,0 +1,50 @@
+/* Ticket detail/edit feature styles (A13). Layout only; primitives styled by @/app/styles.css. */
+.ticket-page {
+  max-width: 720px;
+}
+
+.ticket-page-title {
+  margin: 0 0 1.25rem;
+  font-size: 1.4rem;
+}
+
+.ticket-form-textarea {
+  resize: vertical;
+  min-height: 8rem;
+  font: inherit;
+}
+
+.ticket-form-actions {
+  display: flex;
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+
+.ticket-view-actions {
+  display: flex;
+  gap: 0.6rem;
+  justify-content: flex-end;
+  margin-bottom: 1rem;
+}
+
+.ticket-fields {
+  display: grid;
+  grid-template-columns: minmax(120px, max-content) 1fr;
+  gap: 0.5rem 1rem;
+  margin: 0;
+}
+
+.ticket-fields dt {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-muted);
+}
+
+.ticket-fields dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+.ticket-body {
+  white-space: pre-wrap;
+}

@@ -1,0 +1,49 @@
+# R0 — Architecture Review
+
+- **Reviewer:** R0 (Architecture, read-only)
+- **Scope:** `backend/`, `frontend/`, `packages/shared/` against the approved architecture, Clean Architecture + SOLID, and TDR + ADR-0002/0003/0004/0005/0006/0008/0009.
+- **Date:** 2026-07-07 · **Phase:** 3
+- **Verdict:** No Critical findings. **Zero circular dependencies. Module boundaries and the DB-only cross-module seam (ADR-0002/0005) are respected. Layering, single-client, single-auth-context, and the error contract are sound.** Findings below are Medium/Low — chiefly one ADR-0002 deviation, cross-feature duplication, and an inconsistent service layer in two backend modules.
+
+---
+
+## Severity-ranked findings
+
+| # | Sev | Finding | Evidence (file:line) | Principle violated | Owner | Recommended fix | Status |
+|---|-----|---------|----------------------|--------------------|-------|-----------------|--------|
+| 1 | **Medium** | **ADR-0002 non-conformance.** `backend/src/db/index.ts` exports `getDb()` **and** `dbHealthcheck()` — the *exact* alternative ADR-0002 lists as **Rejected** ("`getDb()` factory / exported healthcheck helper — wider surface than needed; a single `prisma` singleton suffices"). ADR-0002 states liveness "runs a trivial query through `prisma` — no extra exported helper is part of the frozen signature." `getDb()` is also **dead code** (no caller). | `backend/src/db/index.ts:15` (`getDb`), `:24` (`dbHealthcheck`); consumed at `backend/src/app.ts:16,40` | ADR-0002 conformance; SRP / minimal-surface; YAGNI | **A3** (owns `db/**`); A4 consumes in `app.ts` | Remove `getDb()`. Either (a) inline the `SELECT 1` in `/ready` through the frozen `prisma` export as ADR-0002 prescribes, or (b) get a superseding ADR that widens the frozen signature to include a healthcheck helper (MO-ratified, G1-logged). Flag to MO: shipped surface contradicts a frozen Accepted ADR. | Open |
+| 2 | **Medium** | **Duplicated error-envelope normalization across 6 feature modules.** The same "narrow openapi-fetch `error` → `{code,message}`/`Error`" logic is copy-pasted: `toError` (board), `errorMessage` (tickets), `errorMessage` (comments, byte-identical to tickets), `ApiError` class + `toApiError` (teams), `ApiError` + `toApiError` (epics, byte-identical to teams), `apiError` (auth). Five near-identical implementations of one concern. | `frontend/src/features/board/api.ts:36`; `tickets/api.ts:52`; `comments/api.ts:18`; `teams/api.ts:18,29`; `epics/api.ts:18,29`; `auth/errors.ts:17` | DRY; single-responsibility; DIP (features re-deriving a foundation concern) | **A9** (provide in `@/lib`); consumers **A10/A11/A12/A13** adopt | Add one shared helper/`ApiError` in A9's foundation (`@/lib/api` or `@/lib/errors`); features import it. Removes 5 duplicate copies and unifies 409-code surfacing. | Open |
+| 3 | **Medium** | **Inconsistent layer separation in backend feature modules.** Tickets (`service.ts`) and auth (`service.ts`) cleanly split domain logic from the Fastify plugin. **Teams (A6) and Epics (A15) have no service layer** — normalization, dependency-count business rules, and Prisma-error→domain mapping live inline in the route-module plugin. Handlers are the domain layer, hurting testability + SRP and diverging from the pattern the plan/tickets establish. | `backend/src/modules/teams/index.ts:72,81,180-198` (logic in plugin); `backend/src/modules/epics/index.ts:64,107-124,177-194` | Clean Architecture (presentation vs domain separation); SRP; architectural consistency | **A6** (teams), **A15** (epics) | Extract domain rules into `modules/teams/service.ts` and `modules/epics/service.ts` mirroring `tickets/service.ts`; keep `index.ts` thin (route wiring only). | Open |
+| 4 | **Medium** | **Duplicated display-label maps across features.** `STATE_LABELS` + `TYPE_LABELS` are defined twice with identical content in board (A12) and tickets (A13). Any label edit must be made in two owners' trees. | `frontend/src/features/board/labels.ts:13,21` vs `frontend/src/features/tickets/api.ts:31,37` | DRY; single source of truth | **A9** (host in `@/lib`) or **A1** (host in `@app/shared`); A12/A13 consume | Move the label maps to one shared home (foundation `@/lib` or `@app/shared` alongside the enum constants) and import from both features. | Open |
+| 5 | **Low** | **ADR-0008 cross-feature surface exceeded.** `tickets/TicketView.tsx` imports `CommentsPanel` from `@/features/comments`. ADR-0008 declares the cross-feature-public set is **only** each feature's `routes` + `ticketRoutes`; deep-importing another feature is forbidden. Impact is low (both features are A13-owned; comments exposes a deliberate `index.ts` barrel), but the frozen ADR-0008 surface does not sanction it. | `frontend/src/features/tickets/TicketView.tsx:11`; barrel `frontend/src/features/comments/index.ts:7` | ADR-0008 conformance; feature encapsulation | **A13** (owns both); flag **A1/MO** | Either write a superseding ADR sanctioning the `@/features/comments` barrel as a cross-feature public surface, or fold comments under the tickets feature tree so no cross-feature import exists. | Open |
+| 6 | **Low** | **Framework type leaking into the domain layer.** `auth/service.ts` (domain) depends on Fastify's `FastifyBaseLogger` type in its function signatures, coupling the service to the web framework (violates DIP — the domain should depend on an abstraction). | `backend/src/modules/auth/service.ts:9,61,80,138` | Clean Architecture (no framework in domain); DIP | **A5** | Define a minimal `Logger` interface (`{ error(...): void }`) in the module/core and accept that instead of `FastifyBaseLogger`. | Open |
+| 7 | **Low** | **Minor duplication:** identical `formatTimestamp` helper in two A13 components. | `frontend/src/features/tickets/TicketView.tsx:22`; `frontend/src/features/comments/CommentsPanel.tsx:13` | DRY | **A13** | Extract to a shared date util (feature-local or `@/lib`). | Open |
+
+---
+
+## What was verified clean (evidence)
+
+- **Circular dependencies — NONE.** Backend: `app.ts → core/*, db, modules/*`; modules import only `db`, `core/errors`, `core/auth`, `core/config`, `@app/shared`, `@prisma/client` — no back-edge to `app.ts` and no module→module import. Frontend: `app/router → shell, lib/auth, components, features/*/routes`; `lib/api → lib/auth`; features → `@/lib`, `@/components`, `@app/shared`. The `ticketRoutes` constants were deliberately split into `tickets/paths.ts` to avoid a `routes.tsx`↔component cycle (`paths.ts:6-8`).
+- **Dependency direction / DB-only cross-module seam (ADR-0002/0005).** No module imports another module's internals. Cross-module needs go through Prisma: e.g. teams reads `prisma.epic`/`prisma.ticket` directly (`teams/index.ts:144,180-183`), tickets validates epics via `prisma.epic` (`tickets/service.ts:49`). No `new PrismaClient()` outside `db/client.ts:20`.
+- **Single API client / single auth context (ADR-0008).** Exactly one `createClient` (`lib/api.ts:17`); no `fetch`/`axios` in features; one `QueryClient` (`app/providers.tsx:10`); one `AuthProvider`.
+- **Logic placement (frontend).** Business/validation logic sits in `service.ts`/`validation.ts`/`filters.ts`/`api.ts` hooks, not JSX. Components are presentational; the board's filtering/bucketing is pure + memoized (`board/filters.ts`, `BoardPage.tsx:91`).
+- **Error contract (ADR-0003).** All backend domain outcomes throw `DomainError` subclasses; no module sets an error HTTP status manually (only success 201/204/202/302 and the 503 readiness probe use `reply.code`). Central handler maps 500 with no stack/detail leak (`core/errors.ts:118-121`).
+- **Auth contract (ADR-0004).** Single JWT source in `core/auth.ts`; `requireAuth` applied globally; `PUBLIC_ROUTES` frozen list matches ADR; no per-route auth in modules; identity read from `request.authUser`. The email-verification token is correctly A5's own non-JWT (`modules/auth/tokens.ts`).
+- **Module registration (ADR-0005).** Every module is a default-export `FastifyPluginAsync`; prefixes match the frozen table; tickets+comments share `/api/tickets` with disjoint route sets (`core/modules.ts:39-45`).
+- **`@app/shared` (ADR-0006).** Public entry exports exactly the frozen API (`paths/components/operations`, enum constants + arrays, `errorCodes`, `RouteSchemas`, `schemas`); no relative deep-imports into the package from either app; no re-declared enums.
+- **Transport (ADR-0009).** `baseUrl:'/api'` (`lib/api.ts:17`); Vite proxy targets `http://localhost:3000` (`vite.config.ts:36`); **no CORS anywhere in the backend**; backend serves only `/api/*` + `/health`/`/ready`.
+- **TDR conformance.** No unapproved architectural technology found: single ORM (Prisma), single framework (Fastify 5), single state lib (TanStack Query), single validator path (Ajv via `@app/shared` schemas), Argon2id, `@fastify/jwt`. No zod, no axios, no second client/state manager, no ORM bypass. `localStorage` holds only the bearer token — never domain data (`lib/auth.tsx:56-85`), honoring TDR §3 / REQUIREMENTS §9.
+- **Folder organization / ownership.** Every source file sits in the tree owned by its agent per `OWNERSHIP.md`; no cross-boundary code import detected.
+
+## ADR conformance summary
+| ADR | Status |
+|---|---|
+| 0002 Database client | **Deviation** — Finding #1 (rejected helpers shipped; frozen `prisma` export itself intact) |
+| 0003 Domain errors | Conformant |
+| 0004 Auth helper | Conformant |
+| 0005 Module registration | Conformant |
+| 0006 `@app/shared` | Conformant |
+| 0008 Frontend foundation | **Minor deviation** — Finding #5 (cross-feature surface exceeded) |
+| 0009 API transport | Conformant |
+
+> Note: all ADRs and the TDR still carry placeholder `YYYY-MM-DD` dates and `TDR version v1 / Approved date YYYY-MM-DD`. Not an architecture-code finding, but flagged to A1/G1 for hygiene before Phase-4 sign-off.

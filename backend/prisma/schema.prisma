@@ -1,0 +1,145 @@
+// Hackathon Ticket Tracker — persistence schema (A3).
+// Source of truth for the relational model. Aligns with contracts/openapi.yaml
+// (entity/field names + enums) and docs/architecture/database-overview.md.
+//
+// Conventions:
+//   * Primary keys are PostgreSQL `uuid` (app-generated uuid v4 via @default(uuid())).
+//   * Model fields are camelCase; physical columns/tables are snake_case via @map/@@map.
+//   * Case-insensitive uniqueness (email, team name) uses the PostgreSQL `citext`
+//     extension (@db.Citext) — see docs/process/handoffs/A3.md.
+//   * Timestamps are UTC, server-set. `modifiedAt` uses @updatedAt.
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [citext]
+}
+
+// Ticket type label — mirrors TicketType in contracts/openapi.yaml.
+enum TicketType {
+  bug
+  feature
+  fix
+
+  @@map("ticket_type")
+}
+
+// Canonical workflow state — mirrors TicketState in contracts/openapi.yaml.
+enum TicketState {
+  new
+  ready_for_implementation
+  in_progress
+  ready_for_acceptance
+  done
+
+  @@map("ticket_state")
+}
+
+model User {
+  id            String   @id @default(uuid()) @db.Uuid
+  email         String   @unique @db.Citext
+  passwordHash  String   @map("password_hash")
+  emailVerified Boolean  @default(false) @map("email_verified")
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  modifiedAt    DateTime @updatedAt @map("modified_at") @db.Timestamptz(3)
+
+  verificationTokens VerificationToken[]
+  ticketsCreated     Ticket[]            @relation("TicketCreatedBy")
+  comments           Comment[]
+
+  @@map("users")
+}
+
+model VerificationToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  token     String    @unique
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(3)
+  usedAt    DateTime? @map("used_at") @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  userId String @map("user_id") @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("verification_tokens")
+}
+
+model Team {
+  id         String   @id @default(uuid()) @db.Uuid
+  name       String   @unique @db.Citext
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  modifiedAt DateTime @updatedAt @map("modified_at") @db.Timestamptz(3)
+
+  epics   Epic[]
+  tickets Ticket[]
+
+  @@map("teams")
+}
+
+model Epic {
+  id          String   @id @default(uuid()) @db.Uuid
+  title       String
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  modifiedAt  DateTime @updatedAt @map("modified_at") @db.Timestamptz(3)
+
+  teamId String @map("team_id") @db.Uuid
+  // Deleting a team that still owns epics is blocked at the DB (RESTRICT) and
+  // surfaced by the API as 409 TEAM_HAS_DEPENDENTS.
+  team   Team   @relation(fields: [teamId], references: [id], onDelete: Restrict)
+
+  tickets Ticket[]
+
+  @@index([teamId])
+  @@map("epics")
+}
+
+model Ticket {
+  id         String      @id @default(uuid()) @db.Uuid
+  type       TicketType
+  state      TicketState @default(new)
+  title      String
+  body       String
+  createdAt  DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+  modifiedAt DateTime    @updatedAt @map("modified_at") @db.Timestamptz(3)
+
+  teamId String @map("team_id") @db.Uuid
+  // Deleting a team that still owns tickets is blocked (RESTRICT) -> 409.
+  team   Team   @relation(fields: [teamId], references: [id], onDelete: Restrict)
+
+  epicId String? @map("epic_id") @db.Uuid
+  // Deleting an epic still referenced by tickets is blocked (RESTRICT) -> 409.
+  epic   Epic?   @relation(fields: [epicId], references: [id], onDelete: Restrict)
+
+  createdBy String @map("created_by") @db.Uuid
+  creator   User   @relation("TicketCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
+
+  comments Comment[]
+
+  @@index([teamId])
+  @@index([epicId])
+  @@index([createdBy])
+  @@map("tickets")
+}
+
+model Comment {
+  id        String   @id @default(uuid()) @db.Uuid
+  body      String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  ticketId String @map("ticket_id") @db.Uuid
+  // Deleting a ticket cascades to its comments.
+  ticket   Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  authorId String @map("author_id") @db.Uuid
+  author   User   @relation(fields: [authorId], references: [id], onDelete: Restrict)
+
+  @@index([ticketId])
+  @@index([authorId])
+  @@map("comments")
+}

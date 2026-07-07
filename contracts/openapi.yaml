@@ -1,0 +1,1138 @@
+openapi: 3.1.0
+info:
+  title: Hackathon Ticket Tracker API
+  version: 1.0.0
+  description: >
+    Single source of truth for the backend <-> frontend seam of the Kanban-style
+    Ticket Tracker. Covers authentication, teams, epics, tickets (board list with
+    type/epic filters and case-insensitive title search) and comments.
+
+
+    Conventions (see docs/architecture/api-overview.md and ADR-0009):
+      * Base path is `/api` (same-origin; nginx proxies `/api/*` -> backend).
+      * JSON request/response bodies unless noted (verify-email returns a 302 redirect).
+      * Authentication is a bearer JWT in the `Authorization` header - never in a URL.
+        The single-use email-verification token MAY appear as a URL query parameter.
+      * All timestamps are ISO-8601 UTC (`date-time`).
+      * Errors use the shared `Error` schema `{ code, message, details? }`.
+  license:
+    name: MIT
+    identifier: MIT
+
+servers:
+  - url: /api
+    description: Same-origin API base path (nginx proxies /api/* to the backend).
+
+tags:
+  - name: auth
+    description: Sign up, login, logout, email verification (public + logout).
+  - name: teams
+    description: Team CRUD. All verified users manage all teams.
+  - name: epics
+    description: Epic CRUD. Each epic belongs to exactly one (immutable) team.
+  - name: tickets
+    description: Ticket CRUD and Kanban board listing with filters + title search.
+  - name: comments
+    description: Ticket comments (append-only, chronological).
+
+security:
+  - bearerAuth: []
+
+paths:
+  /auth/signup:
+    post:
+      tags: [auth]
+      operationId: signup
+      summary: Register a new account with email + password.
+      description: >
+        Creates an unverified account and sends a verification email via SMTP.
+        Email is trimmed and compared case-insensitively; must be unique.
+        Password must be at least 8 characters. No auto-login.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignupRequest'
+      responses:
+        '201':
+          description: Account created; verification email dispatched.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignupResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: Email already registered.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: EMAIL_TAKEN
+                message: An account with this email already exists.
+
+  /auth/login:
+    post:
+      tags: [auth]
+      operationId: login
+      summary: Authenticate with local credentials and receive a bearer token.
+      description: >
+        Returns a bearer JWT on success. Unverified accounts are rejected with 403.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Authenticated; bearer token issued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Invalid email or password.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: INVALID_CREDENTIALS
+                message: Invalid email or password.
+        '403':
+          description: Account exists but email is not verified.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: EMAIL_NOT_VERIFIED
+                message: Please verify your email before signing in.
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      summary: Log out the current session (client discards the token).
+      description: >
+        Bearer-authenticated. With stateless JWTs the client discards the token;
+        the endpoint exists for symmetry and any server-side session cleanup.
+      responses:
+        '204':
+          description: Logged out. No content.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/verify-email:
+    get:
+      tags: [auth]
+      operationId: verifyEmail
+      summary: Verify an email address using a single-use token.
+      description: >
+        Public. The single-use token is passed as a query parameter (permitted for
+        the verification token only). Tokens expire after 24h and are single-use.
+        On success the backend responds with a 302 redirect to `${APP_BASE_URL}/login`
+        (no auto-login). See ADR-0009 statement 12.
+      security: []
+      parameters:
+        - name: token
+          in: query
+          required: true
+          description: Single-use email-verification token.
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        '302':
+          description: Verification succeeded; redirect to the login screen.
+          headers:
+            Location:
+              description: Absolute URL of the login screen (`${APP_BASE_URL}/login`).
+              schema:
+                type: string
+                format: uri
+        '400':
+          description: Token missing, malformed, expired, or already used.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                expired:
+                  value:
+                    code: TOKEN_EXPIRED
+                    message: This verification link has expired. Request a new one.
+                used:
+                  value:
+                    code: TOKEN_USED
+                    message: This verification link has already been used.
+                invalid:
+                  value:
+                    code: TOKEN_INVALID
+                    message: This verification link is invalid.
+
+  /auth/resend-verification:
+    post:
+      tags: [auth]
+      operationId: resendVerification
+      summary: Request a fresh verification email.
+      description: >
+        Public. Issues a new verification token (invalidating prior unused tokens)
+        and sends a new email. Responds 202 regardless of whether the address maps
+        to an existing unverified account, to avoid account enumeration.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResendVerificationRequest'
+      responses:
+        '202':
+          description: If the account exists and is unverified, a new email was sent.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /teams:
+    get:
+      tags: [teams]
+      operationId: listTeams
+      summary: List all teams.
+      responses:
+        '200':
+          description: Teams, ordered by name.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Team'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [teams]
+      operationId: createTeam
+      summary: Create a team.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TeamCreateRequest'
+      responses:
+        '201':
+          description: Team created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Team'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: A team with this name already exists (case-insensitive).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: TEAM_NAME_TAKEN
+                message: A team with this name already exists.
+
+  /teams/{teamId}:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+    get:
+      tags: [teams]
+      operationId: getTeam
+      summary: Get a single team.
+      responses:
+        '200':
+          description: The team.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Team'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [teams]
+      operationId: updateTeam
+      summary: Rename a team.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TeamUpdateRequest'
+      responses:
+        '200':
+          description: Team updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Team'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: A team with this name already exists (case-insensitive).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: TEAM_NAME_TAKEN
+                message: A team with this name already exists.
+    delete:
+      tags: [teams]
+      operationId: deleteTeam
+      summary: Delete a team.
+      description: >
+        Fails with 409 if the team still contains tickets or epics (no cascade).
+      responses:
+        '204':
+          description: Team deleted.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Team still has tickets or epics.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: TEAM_HAS_DEPENDENTS
+                message: This team has tickets or epics and cannot be deleted.
+
+  /teams/{teamId}/epics:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+    get:
+      tags: [epics]
+      operationId: listTeamEpics
+      summary: List the epics belonging to a team.
+      description: >
+        Convenience listing used to populate the ticket epic dropdown (same-team only).
+      responses:
+        '200':
+          description: Epics for the team, ordered by title.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Epic'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /epics:
+    get:
+      tags: [epics]
+      operationId: listEpics
+      summary: List epics, optionally filtered by team.
+      parameters:
+        - name: teamId
+          in: query
+          required: false
+          description: Restrict to epics belonging to this team.
+          schema:
+            $ref: '#/components/schemas/Id'
+      responses:
+        '200':
+          description: Epics, ordered by title.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Epic'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [epics]
+      operationId: createEpic
+      summary: Create an epic within a team.
+      description: The team is set at creation and is immutable thereafter.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EpicCreateRequest'
+      responses:
+        '201':
+          description: Epic created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Epic'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Referenced team does not exist.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: TEAM_NOT_FOUND
+                message: Team does not exist.
+
+  /epics/{epicId}:
+    parameters:
+      - $ref: '#/components/parameters/EpicId'
+    get:
+      tags: [epics]
+      operationId: getEpic
+      summary: Get a single epic.
+      responses:
+        '200':
+          description: The epic.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Epic'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [epics]
+      operationId: updateEpic
+      summary: Update an epic's title/description.
+      description: The team association cannot be changed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EpicUpdateRequest'
+      responses:
+        '200':
+          description: Epic updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Epic'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [epics]
+      operationId: deleteEpic
+      summary: Delete an epic.
+      description: Fails with 409 if any ticket still references it.
+      responses:
+        '204':
+          description: Epic deleted.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Epic is still referenced by one or more tickets.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: EPIC_REFERENCED
+                message: This epic is referenced by tickets and cannot be deleted.
+
+  /tickets:
+    get:
+      tags: [tickets]
+      operationId: listTickets
+      summary: List tickets for a team's board, with filters and title search.
+      description: >
+        Returns the tickets for the selected team's Kanban board. Optional filters
+        (type, epicId, q) are AND-combined. `q` is a case-insensitive substring match
+        over the ticket title. Results are ordered by `modifiedAt` descending
+        (most-recently-modified first) so callers can bucket them into the five state
+        columns.
+      parameters:
+        - name: teamId
+          in: query
+          required: true
+          description: The team whose board to list.
+          schema:
+            $ref: '#/components/schemas/Id'
+        - name: type
+          in: query
+          required: false
+          description: Filter by ticket type.
+          schema:
+            $ref: '#/components/schemas/TicketType'
+        - name: epicId
+          in: query
+          required: false
+          description: Filter by referenced epic.
+          schema:
+            $ref: '#/components/schemas/Id'
+        - name: q
+          in: query
+          required: false
+          description: Case-insensitive substring search over the ticket title.
+          schema:
+            type: string
+            maxLength: 200
+      responses:
+        '200':
+          description: Matching tickets, most-recently-modified first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Ticket'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [tickets]
+      operationId: createTicket
+      summary: Create a ticket.
+      description: >
+        `createdBy` and timestamps are server-set. If `epicId` is provided it must
+        reference an epic in the same team, else 400 EPIC_TEAM_MISMATCH.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TicketCreateRequest'
+      responses:
+        '201':
+          description: Ticket created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ticket'
+        '400':
+          description: Validation error, invalid enum, or cross-team epic.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                validation:
+                  value:
+                    code: VALIDATION_ERROR
+                    message: Request body failed validation.
+                epicTeamMismatch:
+                  value:
+                    code: EPIC_TEAM_MISMATCH
+                    message: Epic must belong to the ticket's team.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Referenced team or epic does not exist.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /tickets/{ticketId}:
+    parameters:
+      - $ref: '#/components/parameters/TicketId'
+    get:
+      tags: [tickets]
+      operationId: getTicket
+      summary: Get a ticket with all fields.
+      responses:
+        '200':
+          description: The ticket.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ticket'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [tickets]
+      operationId: updateTicket
+      summary: Update a ticket (type, team, epic, title, body, state).
+      description: >
+        Partial update. `modifiedAt` advances only when a field actually changes;
+        saving unchanged values must not advance it. Changing `team` requires a
+        compatible `epicId` (same team) or `epicId: null`. Any-to-any state moves
+        are allowed. This operation also persists drag-and-drop state changes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TicketUpdateRequest'
+      responses:
+        '200':
+          description: Ticket updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ticket'
+        '400':
+          description: Validation error, invalid enum, or cross-team epic.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                validation:
+                  value:
+                    code: VALIDATION_ERROR
+                    message: Request body failed validation.
+                epicTeamMismatch:
+                  value:
+                    code: EPIC_TEAM_MISMATCH
+                    message: Epic must belong to the ticket's team.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [tickets]
+      operationId: deleteTicket
+      summary: Delete a ticket (cascades to its comments).
+      responses:
+        '204':
+          description: Ticket and its comments deleted.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /tickets/{ticketId}/comments:
+    parameters:
+      - $ref: '#/components/parameters/TicketId'
+    get:
+      tags: [comments]
+      operationId: listComments
+      summary: List a ticket's comments, oldest first.
+      responses:
+        '200':
+          description: Comments in chronological order (oldest first).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Comment'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [comments]
+      operationId: createComment
+      summary: Add a comment to a ticket.
+      description: >
+        Author is the authenticated user; `createdAt` is server-set. Adding a comment
+        does NOT change the ticket's `modifiedAt`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommentCreateRequest'
+      responses:
+        '201':
+          description: Comment created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Comment'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >
+        Bearer JWT in the `Authorization` header. Never transmitted in a URL.
+
+  parameters:
+    TeamId:
+      name: teamId
+      in: path
+      required: true
+      description: Team identifier.
+      schema:
+        $ref: '#/components/schemas/Id'
+    EpicId:
+      name: epicId
+      in: path
+      required: true
+      description: Epic identifier.
+      schema:
+        $ref: '#/components/schemas/Id'
+    TicketId:
+      name: ticketId
+      in: path
+      required: true
+      description: Ticket identifier.
+      schema:
+        $ref: '#/components/schemas/Id'
+
+  responses:
+    BadRequest:
+      description: Validation error (invalid body, params, or enum value).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: VALIDATION_ERROR
+            message: Request failed validation.
+            details:
+              field: title
+    Unauthorized:
+      description: Missing or invalid bearer token.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: UNAUTHORIZED
+            message: Authentication required.
+    Forbidden:
+      description: Authenticated but not permitted (e.g. unverified account).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: EMAIL_NOT_VERIFIED
+            message: Please verify your email before using the app.
+    NotFound:
+      description: The requested resource was not found.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: NOT_FOUND
+            message: Resource does not exist.
+
+  schemas:
+    Id:
+      type: string
+      description: Opaque stable identifier (UUID or DB-numeric string).
+      minLength: 1
+      examples:
+        - 3f2504e0-4f89-41d3-9a0c-0305e82c3301
+
+    TicketType:
+      type: string
+      description: Ticket type label (no behavioral difference).
+      enum: [bug, feature, fix]
+
+    TicketState:
+      type: string
+      description: Canonical workflow state (UI renders human-readable labels).
+      enum:
+        - new
+        - ready_for_implementation
+        - in_progress
+        - ready_for_acceptance
+        - done
+
+    Error:
+      type: object
+      description: Shared error envelope for all non-2xx responses.
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Stable machine-readable error code (SCREAMING_SNAKE_CASE).
+          examples:
+            - VALIDATION_ERROR
+        message:
+          type: string
+          description: Human-readable, safe-to-expose message.
+        details:
+          type: object
+          description: Optional structured context.
+          additionalProperties: true
+
+    MessageResponse:
+      type: object
+      additionalProperties: false
+      required: [message]
+      properties:
+        message:
+          type: string
+
+    SignupRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          description: Email address (trimmed, compared case-insensitively).
+          minLength: 3
+          maxLength: 254
+        password:
+          type: string
+          description: Plaintext password (hashed server-side; never stored raw).
+          minLength: 8
+          maxLength: 200
+
+    SignupResponse:
+      type: object
+      additionalProperties: false
+      required: [message]
+      properties:
+        message:
+          type: string
+          description: Confirmation that a verification email was sent.
+
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          minLength: 3
+          maxLength: 254
+        password:
+          type: string
+          minLength: 1
+          maxLength: 200
+
+    LoginResponse:
+      type: object
+      additionalProperties: false
+      required: [token, user]
+      properties:
+        token:
+          type: string
+          description: Bearer JWT to send in the Authorization header.
+        user:
+          $ref: '#/components/schemas/User'
+
+    ResendVerificationRequest:
+      type: object
+      additionalProperties: false
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+          minLength: 3
+          maxLength: 254
+
+    User:
+      type: object
+      description: Public representation of an account.
+      additionalProperties: false
+      required: [id, email, emailVerified, createdAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        email:
+          type: string
+          format: email
+        emailVerified:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+
+    Team:
+      type: object
+      additionalProperties: false
+      required: [id, name, createdAt, modifiedAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        name:
+          type: string
+          description: Team name (non-empty after trim; unique case-insensitively).
+          minLength: 1
+          maxLength: 120
+        createdAt:
+          type: string
+          format: date-time
+        modifiedAt:
+          type: string
+          format: date-time
+
+    TeamCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+
+    TeamUpdateRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+
+    Epic:
+      type: object
+      additionalProperties: false
+      required: [id, teamId, title, createdAt, modifiedAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        teamId:
+          $ref: '#/components/schemas/Id'
+        title:
+          type: string
+          description: Epic title (non-empty after trim).
+          minLength: 1
+          maxLength: 200
+        description:
+          type: [string, 'null']
+          description: Optional description.
+          maxLength: 5000
+        createdAt:
+          type: string
+          format: date-time
+        modifiedAt:
+          type: string
+          format: date-time
+
+    EpicCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [teamId, title]
+      properties:
+        teamId:
+          $ref: '#/components/schemas/Id'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: [string, 'null']
+          maxLength: 5000
+
+    EpicUpdateRequest:
+      type: object
+      description: Team association is immutable and cannot be updated.
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: [string, 'null']
+          maxLength: 5000
+
+    Ticket:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - teamId
+        - type
+        - state
+        - epicId
+        - title
+        - body
+        - createdBy
+        - createdAt
+        - modifiedAt
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        teamId:
+          $ref: '#/components/schemas/Id'
+        type:
+          $ref: '#/components/schemas/TicketType'
+        state:
+          $ref: '#/components/schemas/TicketState'
+        epicId:
+          oneOf:
+            - $ref: '#/components/schemas/Id'
+            - type: 'null'
+          description: Referenced epic (same team), or null.
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        body:
+          type: string
+          description: Plain text or Markdown; non-empty.
+          minLength: 1
+          maxLength: 20000
+        createdBy:
+          $ref: '#/components/schemas/Id'
+        createdAt:
+          type: string
+          format: date-time
+        modifiedAt:
+          type: string
+          format: date-time
+
+    TicketCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [teamId, type, title, body]
+      properties:
+        teamId:
+          $ref: '#/components/schemas/Id'
+        type:
+          $ref: '#/components/schemas/TicketType'
+        state:
+          $ref: '#/components/schemas/TicketState'
+          description: Optional; defaults to `new` when omitted.
+        epicId:
+          oneOf:
+            - $ref: '#/components/schemas/Id'
+            - type: 'null'
+          description: Optional epic from the same team, or null.
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        body:
+          type: string
+          minLength: 1
+          maxLength: 20000
+
+    TicketUpdateRequest:
+      type: object
+      description: Partial update; at least one property must be present.
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        teamId:
+          $ref: '#/components/schemas/Id'
+        type:
+          $ref: '#/components/schemas/TicketType'
+        state:
+          $ref: '#/components/schemas/TicketState'
+        epicId:
+          oneOf:
+            - $ref: '#/components/schemas/Id'
+            - type: 'null'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        body:
+          type: string
+          minLength: 1
+          maxLength: 20000
+
+    Comment:
+      type: object
+      additionalProperties: false
+      required: [id, ticketId, authorId, body, createdAt]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        ticketId:
+          $ref: '#/components/schemas/Id'
+        authorId:
+          $ref: '#/components/schemas/Id'
+        body:
+          type: string
+          minLength: 1
+          maxLength: 20000
+        createdAt:
+          type: string
+          format: date-time
+
+    CommentCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [body]
+      properties:
+        body:
+          type: string
+          minLength: 1
+          maxLength: 20000

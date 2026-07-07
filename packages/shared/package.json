@@ -1,0 +1,36 @@
+{
+  "name": "@app/shared",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Shared contract artifacts (generated OpenAPI types, enum constants, error codes, JSON Schemas) for the Ticket Tracker. Single source of truth per ADR-0006.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "gen:types": "openapi-typescript ../../contracts/openapi.yaml -o ./src/openapi.d.ts",
+    "gen:schemas": "node ./scripts/build-schemas.mjs",
+    "gen": "npm run gen:types && npm run gen:schemas",
+    "build": "node ./scripts/build.mjs",
+    "mock": "prism mock ../../contracts/openapi.yaml -p 3000"
+  },
+  "devDependencies": {
+    "@stoplight/prism-cli": "^5.0.0",
+    "js-yaml": "^4.1.0",
+    "openapi-typescript": "^7.0.0",
+    "typescript": "5.6.3"
+  },
+  "dependencies": {
+    "@types/json-schema": "^7.0.15"
+  }
+}

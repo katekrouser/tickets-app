@@ -1,0 +1,85 @@
+# Hackathon Ticket Tracker — Compose stack (A2).
+# One command from a clean checkout:  docker compose up --build
+# Only the `frontend` container publishes a host port (ADR-0009 §11).
+# All ${...} interpolations use ONLY the ADR-0007 variable names.
+
+services:
+  # ---- Persistence tier ----------------------------------------------------
+  postgres:
+    image: postgres:16
+    # Literal local-dev credentials that MATCH the default DATABASE_URL DSN in
+    # .env.example (postgresql://user:pass@postgres:5432/tickets). These are not
+    # secrets and are not sourced from the environment contract.
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: pass
+      POSTGRES_DB: tickets
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d tickets"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  # ---- Application / API tier ---------------------------------------------
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      NODE_ENV: ${NODE_ENV}
+      DATABASE_URL: ${DATABASE_URL}
+      BACKEND_PORT: ${BACKEND_PORT}
+      APP_BASE_URL: ${APP_BASE_URL}
+      JWT_SECRET: ${JWT_SECRET:-}
+      JWT_TTL_HOURS: ${JWT_TTL_HOURS}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASS: ${SMTP_PASS}
+      SMTP_FROM: ${SMTP_FROM}
+    # Wait for a healthy DB; the entrypoint then runs migrations before serving.
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Container-internal only — NOT published to the host (ADR-0009 §11).
+    expose:
+      - "3000"
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "node -e \"fetch('http://127.0.0.1:'+(process.env.BACKEND_PORT||3000)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 40s
+    restart: unless-stopped
+
+  # ---- Presentation tier (nginx serves the compiled SPA, proxies /api) -----
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    # The ONLY host-published port. nginx listens on 80 inside the container.
+    ports:
+      - "${FRONTEND_PORT}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ---- Optional dev-only email capture -------------------------------------
+  # Enable with:  docker compose --profile dev up --build
+  # Web UI: http://localhost:8025 · SMTP: mailhog:1025 (matches .env.example).
+  mailhog:
+    image: mailhog/mailhog:v1.0.1
+    profiles: ["dev"]
+    ports:
+      - "8025:8025"
+    restart: unless-stopped
+
+volumes:
+  postgres-data:

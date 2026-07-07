@@ -1,0 +1,18 @@
+name: governance-validation
+# Audit item Md5 (owner A2). Runs the doc-level self-validation harness (V1/V3/V11/V13).
+# Code/test checks (V2,V5-V10,V12,V14) are added here once backend/frontend exist.
+on:
+  push:
+    paths: ["docs/**", "scripts/validate_governance.py", ".github/workflows/governance-validation.yml"]
+  pull_request:
+    paths: ["docs/**", "scripts/validate_governance.py"]
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run governance self-validation
+        run: python3 scripts/validate_governance.py
